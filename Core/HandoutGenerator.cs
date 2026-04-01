@@ -5,15 +5,24 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Office.Core;
 using Microsoft.Office.Interop.PowerPoint;
+using QuestPDF.Drawing;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
-using QuestPDF.Drawing;
+using Office = Microsoft.Office.Core;
+using PowerPoint = Microsoft.Office.Interop.PowerPoint;
 
 namespace PptNotesHandoutMaker.Core
 {
     public sealed class HandoutGenerator
     {
+        // Main flow:
+        // 1. Validate inputs
+        // 2. Open PowerPoint presentation
+        // 3. Export slide images and extract notes
+        // 4. Build the final PDF
+        // 5. Clean up COM objects and temp files
+
         private readonly HandoutOptions _opt;
 
         private readonly record struct NoteLine(int Level, string Text);
@@ -23,133 +32,214 @@ namespace PptNotesHandoutMaker.Core
             _opt = opt ?? throw new ArgumentNullException(nameof(opt));
         }
 
-        public void Generate(string pptPath, string outputPdfPath, IProgress<string>? progress = null)
+        // ============================================================
+        // Public generation entry point
+        // ============================================================
+        // ============================================================
+// Public generation entry point
+// ============================================================
+public void Generate(string pptPath, string outputPdfPath, IProgress<string>? progress = null)
+{
+    ValidateInputs(pptPath, outputPdfPath);
+
+    if (_opt.AlwaysUseTempLocalCopy)
+    {
+        progress?.Report("Using local temp copy mode.");
+        GenerateCore(pptPath, outputPdfPath, useTempCopy: true, progress);
+        return;
+    }
+
+    try
+    {
+        GenerateCore(pptPath, outputPdfPath, useTempCopy: false, progress);
+    }
+    catch (Exception ex) when (IsRetryablePowerPointComFailure(ex))
+    {
+        progress?.Report("Direct processing failed due to a PowerPoint COM/RPC issue.");
+        progress?.Report("Retrying using a local temp copy...");
+
+        GenerateCore(pptPath, outputPdfPath, useTempCopy: true, progress);
+    }
+}
+
+private void GenerateCore(
+    string pptPath,
+    string outputPdfPath,
+    bool useTempCopy,
+    IProgress<string>? progress = null)
+{
+    PowerPoint.Application? pptApp = null;
+    PowerPoint.Presentation? pres = null;
+
+    bool powerPointWasAlreadyRunning = false;
+
+    string tempWorkDir = Path.Combine(
+        Path.GetTempPath(),
+        "ppt_handout_maker",
+        Guid.NewGuid().ToString("N")
+    );
+
+    string localPptPath = Path.Combine(
+        tempWorkDir,
+        Path.GetFileName(pptPath)
+    );
+
+    string presentationToOpen = pptPath;
+
+    string tempImageDir = useTempCopy
+        ? Path.Combine(tempWorkDir, "images")
+        : Path.Combine(
+            Path.GetTempPath(),
+            "ppt_handout_maker",
+            Guid.NewGuid().ToString("N")
+        );
+
+    try
+    {
+        if (useTempCopy)
         {
-            ValidateInputs(pptPath, outputPdfPath);
+            progress?.Report("Preparing local temp copy...");
+            Directory.CreateDirectory(tempWorkDir);
 
-            Application? pptApp = null;
-            Presentation? pres = null;
+            progress?.Report("Copying presentation to local temp folder...");
+            File.Copy(pptPath, localPptPath, overwrite: true);
 
-            bool powerPointWasAlreadyRunning = false;
+            presentationToOpen = localPptPath;
+        }
 
-            string tempImageDir = Path.Combine(
-                Path.GetTempPath(),
-                "ppt_handout_maker",
-                Guid.NewGuid().ToString("N")
-            );
+        Directory.CreateDirectory(tempImageDir);
 
+        progress?.Report("Starting PowerPoint...");
+
+        powerPointWasAlreadyRunning = PowerPointInterop.TryGetRunningPowerPoint(out pptApp);
+
+        if (pptApp == null)
+        {
+            powerPointWasAlreadyRunning = false;
+            pptApp = new PowerPoint.Application();
+        }
+
+        pptApp.DisplayAlerts = PowerPoint.PpAlertLevel.ppAlertsNone;
+
+        progress?.Report(useTempCopy ? "Opening local temp copy..." : "Opening presentation...");
+        pres = pptApp.Presentations.Open(
+            FileName: presentationToOpen,
+            ReadOnly: Office.MsoTriState.msoTrue,
+            Untitled: Office.MsoTriState.msoFalse,
+            WithWindow: Office.MsoTriState.msoFalse
+        );
+
+        int slideCount = pres.Slides.Count;
+        progress?.Report($"Slide count: {slideCount}");
+
+        float slideRatioHW = pres.PageSetup.SlideHeight / pres.PageSetup.SlideWidth;
+        progress?.Report($"Slide ratio (H/W): {slideRatioHW:0.0000}");
+
+        var items = new List<(int SlideNumber, string SlideImagePath, List<NoteLine> NotesLines)>();
+
+        for (int i = 1; i <= slideCount; i++)
+        {
+            progress?.Report($"SLIDE_PROGRESS|{i}|{slideCount}");
+
+            PowerPoint.Slide? currentSlide = null;
             try
             {
-                progress?.Report("Starting PowerPoint...");
+                currentSlide = pres.Slides[i];
 
-                powerPointWasAlreadyRunning = PowerPointInterop.TryGetRunningPowerPoint(out pptApp);
+                string imagePath = SlideExport.ExportSlidePng(
+                    currentSlide,
+                    tempImageDir,
+                    widthPx: _opt.SlideExportWidthPx);
 
-                if (pptApp == null)
-                {
-                    powerPointWasAlreadyRunning = false;
-                    pptApp = new Application();
-                }
+                var notesLines = NotesExtractor.GetSlideNotesLines(currentSlide);
 
-                pptApp.DisplayAlerts = PpAlertLevel.ppAlertsNone;
+                if (_opt.SkipSlidesWithNoNotes && notesLines.Count == 0)
+                    continue;
 
-                progress?.Report("Opening presentation...");
-                pres = pptApp.Presentations.Open(
-                    FileName: pptPath,
-                    ReadOnly: MsoTriState.msoTrue,
-                    Untitled: MsoTriState.msoFalse,
-                    WithWindow: MsoTriState.msoFalse
-                );
-
-                int slideCount = pres.Slides.Count;
-                progress?.Report($"Slide count: {slideCount}");
-
-                float slideRatioHW = pres.PageSetup.SlideHeight / pres.PageSetup.SlideWidth;
-                progress?.Report($"Slide ratio (H/W): {slideRatioHW:0.0000}");
-
-                var items = new List<(int SlideNumber, string SlideImagePath, List<NoteLine> NotesLines)>();
-
-                for (int i = 1; i <= slideCount; i++)
-                {
-                    progress?.Report($"Exporting slide {i}/{slideCount}...");
-
-                    Slide? slide = null;
-                    try
-                    {
-                        slide = pres.Slides[i];
-
-                        string imagePath = SlideExport.ExportSlidePng(
-                            slide,
-                            tempImageDir,
-                            widthPx: _opt.SlideExportWidthPx);
-
-                        var notesLines = NotesExtractor.GetSlideNotesLines(slide);
-
-                        if (_opt.SkipSlidesWithNoNotes && notesLines.Count == 0)
-                            continue;
-
-                        items.Add((slide.SlideIndex, imagePath, notesLines));
-                    }
-                    finally
-                    {
-                        PowerPointInterop.FinalRelease(slide);
-                    }
-                }
-
-                progress?.Report("Building PDF...");
-                PdfBuilder.BuildHandoutPdf(_opt, items, outputPdfPath, slideRatioHW);
-                progress?.Report("PDF built.");
-
-                progress?.Report("Done.");
-                progress?.Report($"PDF output: {outputPdfPath}");
-            }
-            catch (COMException ex)
-            {
-                throw new InvalidOperationException("PowerPoint COM error occurred.", ex);
+                items.Add((i, imagePath, notesLines));
             }
             finally
             {
-                progress?.Report("Closing presentation...");
-                if (pres != null)
-                {
-                    try { pres.Close(); } catch { }
-                    PowerPointInterop.FinalRelease(pres);
-                }
-
-                progress?.Report("Releasing PowerPoint...");
-                if (pptApp != null)
-                {
-                    try
-                    {
-                        // Only quit PowerPoint if WE started it and no other decks remain open
-                        if (!powerPointWasAlreadyRunning)
-                        {
-                            int openCount = 0;
-                            try { openCount = pptApp.Presentations.Count; } catch { }
-
-                            if (openCount == 0)
-                            {
-                                try { pptApp.Quit(); } catch { }
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        PowerPointInterop.FinalRelease(pptApp);
-                    }
-                }
-
-                progress?.Report("Cleaning temp images...");
-                try
-                {
-                    if (Directory.Exists(tempImageDir))
-                        Directory.Delete(tempImageDir, recursive: true);
-                }
-                catch { }
-
-                progress?.Report("Cleanup complete.");
+                PowerPointInterop.FinalRelease(currentSlide);
             }
         }
 
+        progress?.Report("Building PDF...");
+        PdfBuilder.BuildHandoutPdf(_opt, items, outputPdfPath, slideRatioHW);
+        progress?.Report("PDF built.");
+
+        progress?.Report("Done.");
+        progress?.Report($"PDF output: {outputPdfPath}");
+    }
+    catch (COMException ex)
+    {
+        throw new InvalidOperationException("PowerPoint COM error occurred.", ex);
+    }
+    finally
+    {
+        progress?.Report("Closing presentation...");
+        if (pres != null)
+        {
+            try { pres.Close(); } catch { }
+            PowerPointInterop.FinalRelease(pres);
+        }
+
+        progress?.Report("Releasing PowerPoint...");
+        if (pptApp != null)
+        {
+            try
+            {
+                if (!powerPointWasAlreadyRunning)
+                {
+                    int openCount = 0;
+                    try { openCount = pptApp.Presentations.Count; } catch { }
+
+                    if (openCount == 0)
+                    {
+                        try { pptApp.Quit(); } catch { }
+                    }
+                }
+            }
+            finally
+            {
+                PowerPointInterop.FinalRelease(pptApp);
+            }
+        }
+
+        progress?.Report("Cleaning temp files...");
+        try
+        {
+            if (useTempCopy)
+            {
+                if (Directory.Exists(tempWorkDir))
+                    Directory.Delete(tempWorkDir, recursive: true);
+            }
+            else
+            {
+                if (Directory.Exists(tempImageDir))
+                    Directory.Delete(tempImageDir, recursive: true);
+            }
+        }
+        catch { }
+
+        progress?.Report("Cleanup complete.");
+    }
+}
+
+private static bool IsRetryablePowerPointComFailure(Exception ex)
+{
+    if (ex is COMException)
+        return true;
+
+    if (ex is InvalidOperationException && ex.InnerException is COMException)
+        return true;
+
+    return false;
+}
+
+        // ============================================================
+        // Input validation
+        // ============================================================
         private static void ValidateInputs(string pptPath, string outputPdfPath)
         {
             if (string.IsNullOrWhiteSpace(pptPath))
@@ -163,28 +253,25 @@ namespace PptNotesHandoutMaker.Core
         }
 
         // ============================================================
-        // PowerPoint interop
+        // PowerPoint session and COM cleanup
         // ============================================================
         private static class PowerPointInterop
         {
-            // GetActiveObject for COM (PowerPoint running instance)
             [DllImport("oleaut32.dll", PreserveSig = false)]
             private static extern void GetActiveObject(
                 ref Guid rclsid,
                 IntPtr reserved,
                 [MarshalAs(UnmanagedType.IUnknown)] out object ppunk);
 
-            public static bool TryGetRunningPowerPoint(out Application? app)
+            public static bool TryGetRunningPowerPoint(out PowerPoint.Application? app)
             {
                 app = null;
 
                 try
                 {
-                    // CLSID for PowerPoint.Application
                     Guid clsidPowerPoint = new("91493441-5A91-11CF-8700-00AA0060263B");
-
                     GetActiveObject(ref clsidPowerPoint, IntPtr.Zero, out object obj);
-                    app = (Application)obj;
+                    app = (PowerPoint.Application)obj;
                     return true;
                 }
                 catch
@@ -206,14 +293,12 @@ namespace PptNotesHandoutMaker.Core
         }
 
         // ============================================================
-        // Slide export
+        // Slide image export
         // ============================================================
         private static class SlideExport
         {
             public static string ExportSlidePng(Slide slide, string outDir, int widthPx = 1280)
             {
-                Directory.CreateDirectory(outDir);
-
                 string path = Path.Combine(outDir, $"slide_{slide.SlideIndex:D4}.png");
 
                 var pres = slide.Parent as Presentation;
@@ -228,10 +313,13 @@ namespace PptNotesHandoutMaker.Core
         }
 
         // ============================================================
-        // Notes extraction (nesting + numbering)
+        // Notes extraction and list reconstruction
         // ============================================================
         private static class NotesExtractor
         {
+            // ------------------------------------------------------------
+            // Public entry point
+            // ------------------------------------------------------------
             public static List<NoteLine> GetSlideNotesLines(Slide slide)
             {
                 var raw = new List<(bool IsListItem, int IndentLevel, string Text)>();
@@ -271,7 +359,6 @@ namespace PptNotesHandoutMaker.Core
                 if (raw.Count == 0)
                     return new List<NoteLine>();
 
-                // Level 0 = not bulleted, Level 1 = top-level bullet, Level 2+ nested
                 var result = new List<NoteLine>(raw.Count);
                 foreach (var p in raw)
                 {
@@ -282,6 +369,9 @@ namespace PptNotesHandoutMaker.Core
                 return result;
             }
 
+            // ------------------------------------------------------------
+            // Notes page scanning and text extraction
+            // ------------------------------------------------------------
             private static void ExtractFromShapeTextFrame(
                 Microsoft.Office.Interop.PowerPoint.Shape sh,
                 List<(bool IsListItem, int IndentLevel, string Text)> raw)
@@ -309,7 +399,6 @@ namespace PptNotesHandoutMaker.Core
                         return;
                     }
 
-                    // Numbering counters per indent level for THIS shape
                     var numberCountersByIndent = new Dictionary<int, int>();
 
                     for (int p = 1; p <= paraCount; p++)
@@ -338,21 +427,19 @@ namespace PptNotesHandoutMaker.Core
 
                         if (isNumbered)
                         {
-                            // Reset deeper levels when numbering at a higher level
-                            foreach (var k in numberCountersByIndent.Keys.Where(k => k > indentLevel).ToList())
-                                numberCountersByIndent.Remove(k);
+                            RemoveCountersAbove(numberCountersByIndent, indentLevel);
 
                             int current;
-                            if (!numberCountersByIndent.ContainsKey(indentLevel))
+                            if (!numberCountersByIndent.TryGetValue(indentLevel, out current))
                             {
                                 current = GetBulletStartValueOrDefault(para, 1);
-                                numberCountersByIndent[indentLevel] = current;
                             }
                             else
                             {
-                                current = numberCountersByIndent[indentLevel] + 1;
-                                numberCountersByIndent[indentLevel] = current;
+                                current += 1;
                             }
+
+                            numberCountersByIndent[indentLevel] = current;
 
                             object? styleObj = null;
                             try { styleObj = para.ParagraphFormat.Bullet.Style; } catch { }
@@ -361,18 +448,14 @@ namespace PptNotesHandoutMaker.Core
                         }
                         else if (isBulleted)
                         {
-                            // Bullets should not continue numbering runs at same indent
-                            foreach (var k in numberCountersByIndent.Keys.Where(k => k >= indentLevel).ToList())
-                                numberCountersByIndent.Remove(k);
+                            RemoveCountersAtOrAbove(numberCountersByIndent, indentLevel);
 
                             if (!StartsWithBullet(text))
                                 prefix = "• ";
                         }
                         else
                         {
-                            // Plain paragraphs break numbering sequences at/under this indent
-                            foreach (var k in numberCountersByIndent.Keys.Where(k => k >= indentLevel).ToList())
-                                numberCountersByIndent.Remove(k);
+                            RemoveCountersAtOrAbove(numberCountersByIndent, indentLevel);
                         }
 
                         bool isListItem = isNumbered || isBulleted;
@@ -420,9 +503,50 @@ namespace PptNotesHandoutMaker.Core
                 }
             }
 
+            // ------------------------------------------------------------
+            // Numbering counter maintenance
+            // ------------------------------------------------------------
+            private static void RemoveCountersAbove(Dictionary<int, int> counters, int indentLevel)
+            {
+                if (counters.Count == 0)
+                    return;
+
+                var keysToRemove = new List<int>();
+
+                foreach (int key in counters.Keys)
+                {
+                    if (key > indentLevel)
+                        keysToRemove.Add(key);
+                }
+
+                foreach (int key in keysToRemove)
+                    counters.Remove(key);
+            }
+
+            private static void RemoveCountersAtOrAbove(Dictionary<int, int> counters, int indentLevel)
+            {
+                if (counters.Count == 0)
+                    return;
+
+                var keysToRemove = new List<int>();
+
+                foreach (int key in counters.Keys)
+                {
+                    if (key >= indentLevel)
+                        keysToRemove.Add(key);
+                }
+
+                foreach (int key in keysToRemove)
+                    counters.Remove(key);
+            }
+
+            // ------------------------------------------------------------
+            // Paragraph classification
+            // ------------------------------------------------------------
             private static bool StartsWithBullet(string s)
             {
-                if (string.IsNullOrEmpty(s)) return false;
+                if (string.IsNullOrEmpty(s))
+                    return false;
 
                 char c = s[0];
                 return c == '•' || c == '◦' || c == '▪' || c == '–' || c == '-' || c == '·';
@@ -470,6 +594,9 @@ namespace PptNotesHandoutMaker.Core
                 }
             }
 
+            // ------------------------------------------------------------
+            // Number label formatting
+            // ------------------------------------------------------------
             private static string FormatNumberLabel(int value, object? bulletStyleObj)
             {
                 string? styleName = null;
@@ -508,7 +635,8 @@ namespace PptNotesHandoutMaker.Core
 
             private static string ToAlpha(int value, bool upper)
             {
-                if (value < 1) value = 1;
+                if (value < 1)
+                    value = 1;
 
                 string s = "";
                 int n = value;
@@ -525,7 +653,8 @@ namespace PptNotesHandoutMaker.Core
 
             private static string ToRoman(int value, bool upper)
             {
-                if (value < 1) value = 1;
+                if (value < 1)
+                    value = 1;
 
                 var map = new (int v, string s)[]
                 {
@@ -551,39 +680,87 @@ namespace PptNotesHandoutMaker.Core
         }
 
         // ============================================================
-        // PDF generation (QuestPDF)
+        // PDF layout and rendering
         // ============================================================
         private static class PdfBuilder
         {
+            private static bool _isInitialized;
+            private static readonly object InitLock = new();
+
+            private readonly record struct LayoutSettings(
+                float ThumbBorder,
+                float ThumbPadding,
+                float CellBorder,
+                float BaseThumbWidth,
+                float CompactThumbWidthScale,
+                float CompactHeightScale,
+                float SlideNumberRowHeight,
+                float IndentStep);
+
+            private static void EnsureInitialized()
+            {
+                if (_isInitialized)
+                    return;
+
+                lock (InitLock)
+                {
+                    if (_isInitialized)
+                        return;
+
+                    FontManager.RegisterFontWithCustomName("Arial", File.OpenRead("C:\\Windows\\Fonts\\arial.ttf"));
+                    FontManager.RegisterFontWithCustomName("Arial", File.OpenRead("C:\\Windows\\Fonts\\arialbd.ttf"));
+
+                    QuestPDF.Settings.License = LicenseType.Community;
+
+                    _isInitialized = true;
+                }
+            }
+
             public static void BuildHandoutPdf(
                 HandoutOptions opt,
                 List<(int SlideNumber, string SlideImagePath, List<NoteLine> NotesLines)> items,
                 string outputPdfPath,
                 float slideRatioHW)
             {
-                FontManager.RegisterFont(File.OpenRead("C:\\Windows\\Fonts\\arial.ttf"));
-                FontManager.RegisterFont(File.OpenRead("C:\\Windows\\Fonts\\arialbd.ttf"));
-                QuestPDF.Settings.License = LicenseType.Community;
+                // ------------------------------------------------------------
+                // Initialization and normalized inputs
+                // ------------------------------------------------------------
+                EnsureInitialized();
 
+                string className = (opt.ClassName ?? "").Trim();
+                string pdfTitle = (opt.PdfTitle ?? "").Trim();
+
+                // ------------------------------------------------------------
+                // Shared layout constants
+                // ------------------------------------------------------------
+                var layout = new LayoutSettings(
+                    ThumbBorder: 1f,
+                    ThumbPadding: 2f,
+                    CellBorder: 1f,
+                    BaseThumbWidth: 240f,
+                    CompactThumbWidthScale: 0.7f,
+                    CompactHeightScale: 0.45f,
+                    SlideNumberRowHeight: 14f,
+                    IndentStep: 14f);
+
+                // ------------------------------------------------------------
+                // Document shell
+                // ------------------------------------------------------------
                 Document.Create(container =>
                 {
                     container.Page(page =>
                     {
-                        page.Size(PageSizes.Letter); // portrait
+                        page.Size(PageSizes.Letter);
                         page.Margin(48);
-                        page.DefaultTextStyle(x => x.FontFamily("Arial"));
-                        page.DefaultTextStyle(x => x.FontSize(9));
+                        page.DefaultTextStyle(x => x
+                            .FontFamily("Arial")
+                            .FontSize(9));
 
-                        // Thumbnail sizing constants
-                        const float thumbBorder = 1f;
-                        const float thumbPadding = 2f;
-                        const float cellBorder = 1f;
-
-                        // Header (pages 2+ only)
+                        // ------------------------------------------------------------
+                        // Repeating header and footer
+                        // ------------------------------------------------------------
                         page.Header().ShowIf(ctx => ctx.PageNumber > 1).Element(h =>
                         {
-                            string className = (opt.ClassName ?? "").Trim();
-
                             h.PaddingBottom(8)
                              .AlignRight()
                              .Text(className)
@@ -591,11 +768,8 @@ namespace PptNotesHandoutMaker.Core
                              .Bold();
                         });
 
-                        // Footer (pages 2+ only)
                         page.Footer().ShowIf(ctx => ctx.PageNumber > 1).Element(f =>
                         {
-                            string pdfTitle = (opt.PdfTitle ?? "").Trim();
-
                             f.PaddingTop(6)
                              .Row(row =>
                              {
@@ -616,13 +790,14 @@ namespace PptNotesHandoutMaker.Core
                              });
                         });
 
+                        // ------------------------------------------------------------
+                        // Main page content
+                        // ------------------------------------------------------------
                         page.Content()
                             .PaddingTop(12)
                             .Column(col =>
                             {
-                                string className = (opt.ClassName ?? "").Trim();
-                                string pdfTitle = (opt.PdfTitle ?? "").Trim();
-
+                                // First-page title block
                                 col.Item().ShowIf(ctx => ctx.PageNumber == 1).PaddingBottom(18).Element(titleBlock =>
                                 {
                                     titleBlock.AlignCenter().Column(tc =>
@@ -654,154 +829,21 @@ namespace PptNotesHandoutMaker.Core
                                           .AlignCenter();
                                     });
                                 });
+
+                                // Render one handout block per slide
                                 for (int i = 0; i < items.Count; i++)
                                 {
                                     var (slideNumber, imgPath, notesLines) = items[i];
-                                    bool hasNotes = notesLines != null && notesLines.Count > 0;
 
-                                    // Base thumbnail width
-                                    const float baseThumbWidth = 240f;
-
-                                    // Scale width if no notes
-                                    float effectiveThumbWidth = hasNotes ? baseThumbWidth : baseThumbWidth * 0.7f;
-
-                                    // Recalculate height from width
-                                    float imageHeight = effectiveThumbWidth * slideRatioHW;
-
-                                    // Recalculate box heights
-                                    float thumbBoxHeight =
-                                        imageHeight
-                                        + (2 * thumbPadding)
-                                        + (2 * thumbBorder)
-                                        - cellBorder;
-
-                                    float compactThumbBoxHeight = thumbBoxHeight * 0.45f;
-
-                                    // Final height used everywhere
-                                    float effectiveHeight = hasNotes ? thumbBoxHeight : compactThumbBoxHeight;
-
-                                    col.Item()
-                                       .ShowEntire()
-                                       .PaddingVertical(hasNotes ? 20 : 6)
-                                       .Element(outer =>
-                                       {
-                                           var cell = outer
-                                               .Border(0)
-                                               .BorderColor(Colors.Grey.Darken1)
-                                               .Padding(0);
-
-                                           float effectiveHeight = hasNotes ? thumbBoxHeight : compactThumbBoxHeight;
-
-                                           cell = hasNotes
-                                               ? cell.MinHeight(effectiveHeight)
-                                               : cell.Height(effectiveHeight);
-
-                                           cell.Element(block =>
-                                           {
-                                               block.Row(row =>
-                                               {
-                                                   row.RelativeItem(1.0f).Element(left =>
-                                                   {
-                                                       const float slideNumberRowHeight = 14f;
-                                                       float thumbAreaHeight = Math.Max(1f, effectiveHeight - slideNumberRowHeight);
-
-                                                       left.Height(effectiveHeight)
-                                                           .AlignTop()
-                                                           .Column(lc =>
-                                                           {
-                                                               lc.Spacing(0);
-
-                                                               lc.Item()
-                                                                 .Height(slideNumberRowHeight)
-                                                                 .PaddingHorizontal(4)
-                                                                 .AlignLeft()
-                                                                 .AlignMiddle()
-                                                                 .Text($"Slide {slideNumber}")
-                                                                 .FontSize(8)
-                                                                 .Bold();
-
-                                                               lc.Item()
-                                                                 .Height(thumbAreaHeight)
-                                                                 .AlignCenter()
-                                                                 .AlignMiddle()
-                                                                 .Border(1)
-                                                                 .BorderColor(Colors.Black)
-                                                                 .Padding(2)
-                                                                 .Image(imgPath)
-                                                                 .FitArea();
-                                                           });
-                                                   });
-
-                                                   row.ConstantItem(12);
-
-                                                   row.RelativeItem(1.2f).Element(right =>
-                                                   {
-                                                       right.Column(ncol =>
-                                                       {
-                                                           ncol.Spacing(2);
-
-                                                           var safeNotesLines = notesLines ?? new List<NoteLine>();
-
-                                                           if (safeNotesLines.Count == 0)
-                                                           {
-                                                               ncol.Item().Text("(No notes)");
-                                                               return;
-                                                           }
-
-                                                           const float indentStep = 14f;
-                                                           float gutterWidth = ComputeGutterWidthForSlide(safeNotesLines);
-
-                                                           foreach (var nl in safeNotesLines)
-                                                           {
-                                                               string line = string.IsNullOrWhiteSpace(nl.Text) ? " " : nl.Text;
-
-                                                               int indentLevels = Math.Max(0, nl.Level - 1);
-                                                               float leftPad = indentLevels * indentStep;
-
-                                                               if (nl.Level <= 0)
-                                                               {
-                                                                   ncol.Item()
-                                                                       .PaddingLeft(leftPad)
-                                                                       .Text(line);
-                                                                   continue;
-                                                               }
-
-                                                               var (prefix, body) = SplitListPrefix(line);
-
-                                                               if (string.IsNullOrWhiteSpace(prefix))
-                                                               {
-                                                                   ncol.Item()
-                                                                       .PaddingLeft(leftPad)
-                                                                       .Text(body);
-                                                                   continue;
-                                                               }
-
-                                                               ncol.Item()
-                                                                   .PaddingLeft(leftPad)
-                                                                   .Row(r =>
-                                                                   {
-                                                                       r.ConstantItem(gutterWidth)
-                                                                        .AlignTop()
-                                                                        .Text(prefix);
-
-                                                                       r.RelativeItem()
-                                                                        .AlignTop()
-                                                                        .Text(body);
-                                                                   });
-                                                           }
-
-                                                       });
-                                                   });
-                                               });
-                                           });
-                                       });
-
-                                    if (i < items.Count - 1)
-                                    {
-                                        col.Item()
-                                           .LineHorizontal(1)
-                                           .LineColor(Colors.Grey.Lighten2);
-                                    }
+                                    ComposeSlideBlock(
+                                        col,
+                                        slideNumber,
+                                        imgPath,
+                                        notesLines,
+                                        slideRatioHW,
+                                        showDividerAfter: i < items.Count - 1,
+                                        layout,
+                                        opt);
                                 }
                             });
                     });
@@ -809,14 +851,180 @@ namespace PptNotesHandoutMaker.Core
                 .GeneratePdf(outputPdfPath);
             }
 
-            private static float ComputeGutterWidthForSlide(List<NoteLine>? notesLines)
+            private static void ComposeSlideBlock(
+                ColumnDescriptor col,
+                int slideNumber,
+                string imgPath,
+                List<NoteLine> notesLines,
+                float slideRatioHW,
+                bool showDividerAfter,
+                LayoutSettings layout,
+                HandoutOptions opt)
+            {
+                // Read item state
+                bool hasNotes = notesLines.Count > 0;
+
+                // Compute slide block dimensions
+                float effectiveThumbWidth = hasNotes
+                    ? layout.BaseThumbWidth
+                    : layout.BaseThumbWidth * layout.CompactThumbWidthScale;
+
+                float imageHeight = effectiveThumbWidth * slideRatioHW;
+
+                float thumbBoxHeight =
+                    imageHeight
+                    + (2 * layout.ThumbPadding)
+                    + (2 * layout.ThumbBorder)
+                    - layout.CellBorder;
+
+                float compactThumbBoxHeight = thumbBoxHeight * layout.CompactHeightScale;
+                float effectiveHeight = hasNotes ? thumbBoxHeight : compactThumbBoxHeight;
+
+                // Render slide thumbnail and notes columns
+                col.Item()
+                   .ShowEntire()
+                   .PaddingVertical(hasNotes ? 20 : 6)
+                   .Element(outer =>
+                   {
+                       var cell = outer
+                           .Border(0)
+                           .BorderColor(Colors.Grey.Darken1)
+                           .Padding(0);
+
+                       cell = hasNotes
+                           ? cell.MinHeight(effectiveHeight)
+                           : cell.Height(effectiveHeight);
+
+                       cell.Element(block =>
+                       {
+                           block.Row(row =>
+                           {
+                               // Left column: slide label and thumbnail
+                               row.RelativeItem(1.0f).Element(left =>
+                               {
+                                   float thumbAreaHeight = Math.Max(1f, effectiveHeight - layout.SlideNumberRowHeight);
+
+                                   left.Height(effectiveHeight)
+                                       .AlignTop()
+                                       .Column(lc =>
+                                       {
+                                           lc.Spacing(0);
+
+                                           lc.Item()
+                                             .Height(layout.SlideNumberRowHeight)
+                                             .PaddingHorizontal(4)
+                                             .AlignLeft()
+                                             .AlignMiddle()
+                                             .Text($"Slide {slideNumber}")
+                                             .FontSize(8)
+                                             .Bold();
+
+                                           lc.Item()
+                                             .Height(thumbAreaHeight)
+                                             .AlignCenter()
+                                             .AlignMiddle()
+                                             .Border(1)
+                                             .BorderColor(Colors.Black)
+                                             .Padding(2)
+                                             .Image(imgPath)
+                                             .FitArea();
+                                       });
+                               });
+
+                               row.ConstantItem(12);
+
+                               // Right column: instructor notes
+                               row.RelativeItem(1.2f).Element(right =>
+                               {
+                                   right.Column(ncol =>
+                                   {
+                                       ComposeNotesColumn(ncol, notesLines, layout.IndentStep, opt);
+                                   });
+                               });
+                           });
+                       });
+                   });
+
+                // Divider between slide sections
+                if (showDividerAfter)
+                {
+                    col.Item()
+                       .LineHorizontal(1)
+                       .LineColor(Colors.Grey.Lighten2);
+                }
+            }
+
+            private static void ComposeNotesColumn(
+                ColumnDescriptor ncol,
+                List<NoteLine> notesLines,
+                float indentStep,
+                HandoutOptions opt)
+            {
+                ncol.Spacing(2);
+
+                // Empty-notes case
+                if (notesLines.Count == 0)
+                {
+                    if (opt.ShowNoNotesPlaceholder)
+                        ncol.Item().Text("(No notes)");
+
+                    return;
+                }
+
+                // Notes layout metrics
+                float gutterWidth = ComputeGutterWidthForSlide(notesLines);
+
+                // Note line rendering loop
+                foreach (var nl in notesLines)
+                {
+                    string line = string.IsNullOrWhiteSpace(nl.Text) ? " " : nl.Text;
+
+                    int indentLevels = Math.Max(0, nl.Level - 1);
+                    float leftPad = indentLevels * indentStep;
+
+                    // Plain paragraph
+                    if (nl.Level <= 0)
+                    {
+                        ncol.Item()
+                            .PaddingLeft(leftPad)
+                            .Text(line);
+                        continue;
+                    }
+
+                    var (prefix, body) = SplitListPrefix(line);
+
+                    if (string.IsNullOrWhiteSpace(prefix))
+                    {
+                        ncol.Item()
+                            .PaddingLeft(leftPad)
+                            .Text(body);
+                        continue;
+                    }
+
+                    // List item with aligned prefix/body columns
+                    ncol.Item()
+                        .PaddingLeft(leftPad)
+                        .Row(r =>
+                        {
+                            r.ConstantItem(gutterWidth)
+                             .AlignTop()
+                             .Text(prefix);
+
+                            r.RelativeItem()
+                             .AlignTop()
+                             .Text(body);
+                        });
+                }
+            }
+
+            private static float ComputeGutterWidthForSlide(List<NoteLine> notesLines)
             {
                 const float baseWidth = 5f;
                 const float perChar = 4.0f;
                 const float minWidth = 12f;
                 const float maxWidth = 32f;
 
-                if (notesLines == null || notesLines.Count == 0)
+                if (notesLines.Count == 0)
                     return minWidth;
 
                 int maxPrefixLen = 0;
@@ -856,9 +1064,9 @@ namespace PptNotesHandoutMaker.Core
                     string rest = s.Substring(spaceIdx + 1);
 
                     bool looksNumbered =
-                        firstToken.EndsWith(".") ||
-                        firstToken.EndsWith(")") ||
-                        (firstToken.StartsWith("(") && firstToken.EndsWith(")"));
+                        firstToken.EndsWith('.') ||
+                        firstToken.EndsWith(')') ||
+                        (firstToken.StartsWith('(') && firstToken.EndsWith(')'));
 
                     if (looksNumbered)
                         return (firstToken, rest);
@@ -869,11 +1077,11 @@ namespace PptNotesHandoutMaker.Core
         }
 
         // ============================================================
-        // Helpers currently NOT used by this class
-        // Keeping them here so you don’t lose them, but clearly marked.
+        // Legacy helpers currently unused
+        // These helpers are retained for reference and are not part
+        // of the active handout generation path.
         // ============================================================
 
-        // Output file naming (unused here)
         private static string GetNextAvailableFilePath(string desiredPath)
         {
             if (!File.Exists(desiredPath))
@@ -893,7 +1101,6 @@ namespace PptNotesHandoutMaker.Core
             }
         }
 
-        // Layout helper (unused here)
         private static float ComputeThumbBoxHeightFromLayout(
             float slideRatioHW,
             float pageWidthPts,
@@ -916,14 +1123,11 @@ namespace PptNotesHandoutMaker.Core
             float imageHeight = imageWidth * slideRatioHW;
 
             float boxHeight = imageHeight + (2 * thumbPaddingPts) + (2 * thumbBorderPts);
-
-            // Adjust for the outer cell border so outlines end at the same visual height
             boxHeight -= cellBorderPts;
 
             return boxHeight;
         }
 
-        // Reflection-based helpers (unused here)
         private static float InferIndentStep(List<float> indents)
         {
             if (indents == null || indents.Count < 2)
@@ -978,7 +1182,7 @@ namespace PptNotesHandoutMaker.Core
                 object? visible = GetProp(bullet, "Visible");
                 if (visible == null) return false;
 
-                int v = Convert.ToInt32(visible); // MsoTriState: msoTrue = -1
+                int v = Convert.ToInt32(visible);
                 return v == -1;
             }
             catch

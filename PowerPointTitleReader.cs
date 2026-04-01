@@ -1,8 +1,9 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.IO;
-using PowerPoint = Microsoft.Office.Interop.PowerPoint;
-using Office = Microsoft.Office.Core;
 using System.Text.RegularExpressions;
+using Office = Microsoft.Office.Core;
+using PowerPoint = Microsoft.Office.Interop.PowerPoint;
 
 namespace PptNotesHandoutMaker.Core
 {
@@ -17,22 +18,27 @@ namespace PptNotesHandoutMaker.Core
             PowerPoint.Presentation? pres = null;
             PowerPoint.Slide? slide = null;
 
-            bool powerPointWasAlreadyRunning = false;
+            string tempWorkDir = Path.Combine(
+                Path.GetTempPath(),
+                "ppt_handout_title_reader",
+                Guid.NewGuid().ToString("N")
+            );
+
+            string localPptPath = Path.Combine(
+                tempWorkDir,
+                Path.GetFileName(pptPath)
+            );
 
             try
             {
-                powerPointWasAlreadyRunning = PowerPointInteropUtil.TryGetRunningPowerPoint(out pptApp);
+                Directory.CreateDirectory(tempWorkDir);
+                File.Copy(pptPath, localPptPath, overwrite: true);
 
-                if (pptApp == null)
-                {
-                    powerPointWasAlreadyRunning = false;
-                    pptApp = new PowerPoint.Application();
-                }
-
+                pptApp = new PowerPoint.Application();
                 pptApp.DisplayAlerts = PowerPoint.PpAlertLevel.ppAlertsNone;
 
                 pres = pptApp.Presentations.Open(
-                    FileName: pptPath,
+                    FileName: localPptPath,
                     ReadOnly: Office.MsoTriState.msoTrue,
                     Untitled: Office.MsoTriState.msoFalse,
                     WithWindow: Office.MsoTriState.msoFalse
@@ -59,22 +65,20 @@ namespace PptNotesHandoutMaker.Core
                 {
                     try
                     {
-                        if (!powerPointWasAlreadyRunning)
-                        {
-                            int openCount = 0;
-                            try { openCount = pptApp.Presentations.Count; } catch { }
-
-                            if (openCount == 0)
-                            {
-                                try { pptApp.Quit(); } catch { }
-                            }
-                        }
+                        try { pptApp.Quit(); } catch { }
                     }
                     finally
                     {
                         PowerPointInteropUtil.FinalRelease(pptApp);
                     }
                 }
+
+                try
+                {
+                    if (Directory.Exists(tempWorkDir))
+                        Directory.Delete(tempWorkDir, recursive: true);
+                }
+                catch { }
             }
         }
 
@@ -117,10 +121,7 @@ namespace PptNotesHandoutMaker.Core
                     if (tf == null || tf.HasText != Office.MsoTriState.msoTrue)
                         continue;
 
-                    string text = (tf.TextRange?.Text ?? "")
-                        .Replace("\r", " ")
-                        .Replace("\n", " ")
-                        .Trim();
+                    string text = NormalizeExtractedTitleText(tf.TextRange?.Text ?? "");
 
                     if (string.IsNullOrWhiteSpace(text))
                         continue;
@@ -160,6 +161,19 @@ namespace PptNotesHandoutMaker.Core
             {
                 return false;
             }
+        }
+
+        private static string NormalizeExtractedTitleText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            text = text
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Trim();
+
+            return Regex.Replace(text, @"\s+", " ");
         }
     }
 }

@@ -5,113 +5,185 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:PptNotesHandoutMaker"
         mc:Ignorable="d"
-        Title="Instructor Guide Generator" Height="600" Width="800">
+        Title="Instructor Guide Generator"
+        Height="760"
+        Width="800"
+        MinHeight="760"
+        MinWidth="800">
 
     <Grid Margin="16">
-        <StackPanel>
-            <TextBlock FontSize="18" FontWeight="Bold"
-                       Text="Andy's Handy Dandy Instructor Guide Maker" />
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-            <!-- FILE PICKERS (always visible) -->
-            <Grid Margin="0,12,0,0">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0"
+               FontSize="18"
+               FontWeight="Bold"
+               Text="Andy's Handy Dandy Instructor Guide Maker" />
 
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
+        <Grid Grid.Row="1" Margin="0,30,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
 
-                <!-- PowerPoint -->
-                <TextBlock Grid.Row="0" Grid.Column="0"
-                           Text="PowerPoint file:"
-                           VerticalAlignment="Center"
-                           Margin="0,0,10,8"/>
+            <TextBlock Grid.Column="0"
+               Text="Class name:"
+               VerticalAlignment="Center"
+               Margin="0,0,10,0"/>
 
-                <TextBox Grid.Row="0" Grid.Column="1"
-                         x:Name="PptPathBox"
-                         Height="26"
-                         VerticalContentAlignment="Center"
-                         IsReadOnly="True"
-                         Margin="0,0,10,8"/>
-
-                <Button Grid.Row="0" Grid.Column="2"
-                        Width="110"
-                        Height="26"
-                        Margin="0,0,0,8"
-                        Click="BrowsePpt_Click">
-                    Browse…
-                </Button>
-
-                <!-- Output PDF -->
-                <TextBlock Grid.Row="1" Grid.Column="0"
-                           Text="Output PDF:"
-                           VerticalAlignment="Center"
-                           Margin="0,0,10,0"/>
-
-                <TextBox Grid.Row="1" Grid.Column="1"
-                         x:Name="OutPathBox"
-                         Height="26"
-                         VerticalContentAlignment="Center"
-                         IsReadOnly="True"
-                         Margin="0,0,10,0"/>
-
-                <Button Grid.Row="1" Grid.Column="2"
-                        Width="110"
-                        Height="26"
-                        Click="BrowseOut_Click">
-                    Browse…
-                </Button>
+                <TextBox Grid.Column="1"
+             x:Name="ClassNameBox"
+             Height="26"
+             VerticalContentAlignment="Center"
+             TextChanged="AnyInputChanged"/>
             </Grid>
 
-            <GroupBox Header="Document Title" Margin="0,12,0,0" Padding="12">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
+        <GroupBox Grid.Row="2"
+          Margin="0,12,0,0"
+          Padding="12"
+          MinHeight="260"
+          VerticalAlignment="Stretch">
 
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
+            <GroupBox.Header>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="PowerPoint file(s):" />
+                    <TextBlock x:Name="PptCountText"
+                       Margin="6,0,0,0"
+                       Foreground="Gray"
+                       Visibility="Collapsed"
+                       VerticalAlignment="Center"/>
+                </StackPanel>
+            </GroupBox.Header>
 
-                    <TextBlock Grid.Row="0" Grid.Column="0"
-                   Text="Class name:"
-                   VerticalAlignment="Center"
-                   Margin="0,0,10,6"/>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
 
-                    <TextBox Grid.Row="0" Grid.Column="1"
-                 x:Name="ClassNameBox"
-                 Height="26"
-                 VerticalContentAlignment="Center"
-                 Margin="0,0,0,6"
-                 TextChanged="AnyInputChanged"/>
+                <StackPanel Grid.Row="0"
+                    Orientation="Horizontal"
+                    Margin="0,0,0,8">
+                    <Button x:Name="AddPptBtn"
+                    Content="Add PPT"
+                    Width="80"
+                    Height="26"
+                    Margin="0,0,8,0"
+                    Click="BrowsePpt_Click" />
 
-                    <TextBlock Grid.Row="1" Grid.Column="0"
-                   Text="PDF title:"
+                    <Button x:Name="ClearBatchBtn"
+                    Content="Clear All"
+                    Width="80"
+                    Height="26"
+                    Click="ClearBatch_Click" />
+                </StackPanel>
+
+                <Border Grid.Row="1"
+                        x:Name="DropZoneBorder"
+                        BorderBrush="#D0D0D0"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Background="#FAFAFA"
+                        Padding="8"
+                        AllowDrop="True"
+                        PreviewDragOver="Window_PreviewDragOver"
+                        DragLeave="Window_DragLeave"
+                        Drop="Window_Drop">
+                    <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="BatchTitlesPanel" />
+                        </ScrollViewer>
+
+                        <TextBlock x:Name="DropHintText"
+                           Text="Drag and drop PowerPoint files here"
+                           Foreground="Gray"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Opacity="0.75"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           TextAlignment="Center"
+                           IsHitTestVisible="False"/>
+                    </Grid>
+                </Border>
+            </Grid>
+        </GroupBox>
+
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Grid.Column="0"
+                   Text="Output folder:"
                    VerticalAlignment="Center"
                    Margin="0,0,10,0"/>
 
-                    <TextBox Grid.Row="1" Grid.Column="1"
-                 x:Name="PdfTitleBox"
+            <TextBox Grid.Column="1"
+                 x:Name="OutPathBox"
                  Height="26"
                  VerticalContentAlignment="Center"
-                 TextChanged="AnyInputChanged"/>
-                </Grid>
-            </GroupBox>
+                 IsReadOnly="True"
+                 Margin="0,0,10,0"/>
 
-            <Button x:Name="GenerateBtn" Margin="0,16,0,0" Height="32"
-                    Click="Generate_Click">
-                Generate PDF
+            <Button Grid.Column="2"
+                Width="110"
+                Height="26"
+                Click="BrowseOut_Click">
+                Browse…
             </Button>
+        </Grid>
 
-            <TextBlock Margin="0,16,0,4" Text="Status:" />
-            <TextBox x:Name="StatusBox" Height="220" IsReadOnly="True"
-                     VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" />
-        </StackPanel>
+        <Grid Grid.Row="4" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <!-- Left spacer -->
+                <ColumnDefinition Width="Auto" />
+                <!-- Center (button) -->
+                <ColumnDefinition Width="*" />
+                <!-- Right spacer -->
+            </Grid.ColumnDefinitions>
+
+            <!-- Generate Button (centered) -->
+            <Button x:Name="GenerateBtn"
+            Content="Generate"
+            Width="200"
+            Height="30"
+            Click="Generate_Click"
+            Grid.Column="1"
+            HorizontalAlignment="Center"/>
+
+            <!-- Checkbox (right side) -->
+            <CheckBox x:Name="AlwaysUseTempCopyCheckBox"
+              Content="Always use local temp copy"
+              Margin="10,5,0,0"
+              VerticalAlignment="Center"
+              Checked="AnyOptionChanged"
+              Unchecked="AnyOptionChanged"
+              Grid.Column="2"
+              HorizontalAlignment="Left"/>
+        </Grid>
+
+        <TextBlock Grid.Row="5"
+            x:Name="StatusLabel"
+            Margin="0,16,0,4"
+            Text="Status:" />
+
+        <TextBox Grid.Row="6"
+            x:Name="StatusBox"
+            Margin="0,0,0,0"
+            IsReadOnly="True"
+            VerticalScrollBarVisibility="Auto"
+             TextWrapping="Wrap" />
     </Grid>
 </Window>

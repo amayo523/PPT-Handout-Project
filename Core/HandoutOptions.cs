@@ -18,6 +18,7 @@ namespace PptNotesHandoutMaker.Core
 
         public bool ShowNoNotesPlaceholder { get; set; } = true;
         public bool SkipSlidesWithNoNotes { get; set; } = false;
+        public bool AlwaysUseTempLocalCopy { get; set; } = false;
 
         public string? ClassName { get; set; }
         public string? PdfTitle { get; set; }
