@@ -1,14 +1,16 @@
-﻿using System;
+﻿using PptNotesHandoutMaker.Core;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using PptNotesHandoutMaker.Core;
+using System.Windows.Input;
 
 namespace PptNotesHandoutMaker
 {
@@ -26,9 +28,13 @@ namespace PptNotesHandoutMaker
         // -----------------------------
         private bool _isGenerating;
         private bool _isReadingTitles;
+        private bool _isLoaded;
 
         private readonly ObservableCollection<BatchPptItem> _selectedPpts = new();
         private readonly HashSet<string> _selectedPptPaths = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Regex DigitsOnlyRegex = new(@"^\d+$");
+        private static readonly Regex MonthYearRegex = new(@"^(0[1-9]|1[0-2])\/\d{4}$");
+        private const string DatePlaceholder = "MM/YYYY";
 
         // -----------------------------
         // Construction
@@ -39,9 +45,35 @@ namespace PptNotesHandoutMaker
 
             BatchItemsControl.ItemsSource = _selectedPpts;
 
+            if (UseCurrentDateCheckBox.IsChecked == true)
+            {
+                DateBox.Text = DateTime.Now.ToString("MM/yyyy");
+                DateBox.Foreground = System.Windows.Media.Brushes.Black;
+            }
+            else
+            {
+                DateBox.Text = DatePlaceholder;
+                DateBox.Foreground = System.Windows.Media.Brushes.Gray;
+            }
+
+            UpdateDateInputState();
+
             UpdatePptCountDisplay();
             UpdateDropHintVisibility();
             UpdateDropZoneVisual(DropZoneState.Normal);
+            UpdateUiState();
+
+            _isLoaded = true;
+        }
+
+        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            _isLoaded = true;
+
+            UpdatePptCountDisplay();
+            UpdateDropHintVisibility();
+            UpdateDropZoneVisual(DropZoneState.Normal);
+            UpdateDateInputState();
             UpdateUiState();
         }
 
@@ -50,11 +82,17 @@ namespace PptNotesHandoutMaker
         // -----------------------------
         private void AnyOptionChanged(object sender, RoutedEventArgs e)
         {
+            if (!_isLoaded)
+                return;
+
             UpdateUiState();
         }
 
         private void AnyInputChanged(object sender, TextChangedEventArgs e)
         {
+            if (!_isLoaded)
+                return;
+
             UpdateUiState();
         }
 
@@ -249,20 +287,12 @@ namespace PptNotesHandoutMaker
             if (_isGenerating || _isReadingTitles)
                 return;
 
-            string className = (ClassNameBox.Text ?? string.Empty).Trim();
-            string outputFolder = (OutPathBox.Text ?? string.Empty).Trim();
+            string rawClassName = (ClassNameBox.Text ?? "").Trim();
+            string rawRevision = (RevisionBox.Text ?? "").Trim();
+            string className = BuildDisplayClassName();
+            string displayDate = BuildDisplayDate();
+            string outputFolder = (OutPathBox.Text ?? "").Trim();
             bool alwaysUseTempLocalCopy = AlwaysUseTempCopyCheckBox.IsChecked == true;
-
-            if (string.IsNullOrWhiteSpace(className))
-            {
-                System.Windows.MessageBox.Show(
-                    this,
-                    "Please enter a Class Name before generating PDFs.",
-                    "Missing Course Information",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
-                return;
-            }
 
             if (_selectedPpts.Count == 0)
             {
@@ -271,11 +301,52 @@ namespace PptNotesHandoutMaker
                 return;
             }
 
+            // Hard-stop validation
             if (string.IsNullOrWhiteSpace(outputFolder) || !Directory.Exists(outputFolder))
             {
-                AppendStatus("Choose a valid destination folder.");
-                UpdateUiState();
+                System.Windows.MessageBox.Show(
+                    this,
+                    "Please choose a valid output folder before generating.",
+                    "Missing Output Folder",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+
                 return;
+            }
+
+            // Warning-only validation
+            var missingItems = new List<string>();
+
+            if (string.IsNullOrWhiteSpace(rawClassName))
+                missingItems.Add("Class name");
+
+            if (string.IsNullOrWhiteSpace(rawRevision))
+                missingItems.Add("Revision");
+
+            if (UseCurrentDateCheckBox.IsChecked != true && !MonthYearRegex.IsMatch(displayDate))
+                missingItems.Add("Date (MM/YYYY)");
+
+            bool hasBlankTitles = _selectedPpts.Any(x => string.IsNullOrWhiteSpace(x.PdfTitle));
+            if (hasBlankTitles)
+                missingItems.Add("One or more PDF titles");
+
+            if (missingItems.Count > 0)
+            {
+                string warningMessage =
+                    "The following information is missing:\n\n• " +
+                    string.Join("\n• ", missingItems) +
+                    "\n\nDo you want to generate the PDF(s) anyway?";
+
+                var result = System.Windows.MessageBox.Show(
+                    this,
+                    warningMessage,
+                    "Generate With Missing Information?",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning,
+                    MessageBoxResult.No);
+
+                if (result != MessageBoxResult.Yes)
+                    return;
             }
 
             foreach (var item in _selectedPpts)
@@ -366,6 +437,7 @@ namespace PptNotesHandoutMaker
                             {
                                 ClassName = className,
                                 PdfTitle = pdfTitle,
+                                CreatedDate = displayDate,
                                 ShowNoNotesPlaceholder = true,
                                 AlwaysUseTempLocalCopy = alwaysUseTempLocalCopy
                             };
@@ -594,11 +666,8 @@ namespace PptNotesHandoutMaker
         {
             bool isBusy = _isGenerating || _isReadingTitles;
             bool hasSelectedPpts = _selectedPpts.Count > 0;
-            bool hasOutFolder = !string.IsNullOrWhiteSpace(OutPathBox.Text) && Directory.Exists(OutPathBox.Text);
-            bool hasClass = !string.IsNullOrWhiteSpace(ClassNameBox.Text);
-            bool hasAllTitles = hasSelectedPpts && _selectedPpts.All(x => !string.IsNullOrWhiteSpace(x.PdfTitle));
 
-            GenerateBtn.IsEnabled = !isBusy && hasSelectedPpts && hasOutFolder && hasClass && hasAllTitles;
+            GenerateBtn.IsEnabled = !isBusy && hasSelectedPpts;
             AddPptBtn.IsEnabled = !isBusy;
             ClearBatchBtn.IsEnabled = !isBusy && hasSelectedPpts;
         }
@@ -625,6 +694,317 @@ namespace PptNotesHandoutMaker
                         System.Windows.Media.Color.FromRgb(255, 240, 240));
                     break;
             }
+        }
+
+        // -----------------------------
+        // Class name + revision helper
+        // -----------------------------
+        private string BuildDisplayClassName()
+        {
+            string className = (ClassNameBox.Text ?? "").Trim();
+            string revision = (RevisionBox.Text ?? "").Trim();
+
+            if (string.IsNullOrWhiteSpace(className))
+                return "";
+
+            if (string.IsNullOrWhiteSpace(revision))
+                return className;
+
+            return $"{className}, Rev. {revision}";
+        }
+        private void RevisionBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
+        {
+            e.Handled = !DigitsOnlyRegex.IsMatch(e.Text);
+        }
+        private void RevisionBox_Pasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (!e.DataObject.GetDataPresent(typeof(string)))
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            string pastedText = (string)e.DataObject.GetData(typeof(string))!;
+
+            if (string.IsNullOrWhiteSpace(pastedText) || !DigitsOnlyRegex.IsMatch(pastedText))
+                e.CancelCommand();
+        }
+
+        // -----------------------------
+        // Date input helper
+        // -----------------------------
+        private void UseCurrentDateCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!_isLoaded)
+                return;
+
+            if (UseCurrentDateCheckBox.IsChecked == true)
+            {
+                DateBox.Text = DateTime.Now.ToString("MM/yyyy");
+                DateBox.Foreground = System.Windows.Media.Brushes.Black;
+            }
+            else
+            {
+                DateBox.Text = DatePlaceholder;
+                DateBox.Foreground = System.Windows.Media.Brushes.Gray;
+                DateBox.CaretIndex = 0;
+            }
+
+            UpdateDateInputState();
+            UpdateUiState();
+        }
+
+        private void UpdateDateInputState()
+        {
+            if (DateBox == null || UseCurrentDateCheckBox == null)
+                return;
+
+            bool useCurrentDate = UseCurrentDateCheckBox.IsChecked == true;
+            DateBox.IsEnabled = !useCurrentDate;
+        }
+
+        private string BuildDisplayDate()
+        {
+            if (UseCurrentDateCheckBox.IsChecked == true)
+                return DateTime.Now.ToString("MM/yyyy");
+
+            string manualDate = (DateBox.Text ?? "").Trim();
+
+            if (string.Equals(manualDate, DatePlaceholder, StringComparison.OrdinalIgnoreCase))
+                return "";
+
+            return manualDate;
+        }
+
+        // -----------------------------
+        // Date textbox input restrictions helper
+        // -----------------------------
+        private void DateBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.TextBox textBox)
+                return;
+
+            if (UseCurrentDateCheckBox.IsChecked == true)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(e.Text) || !e.Text.All(char.IsDigit))
+            {
+                e.Handled = true;
+                return;
+            }
+
+            string digits = ExtractDateDigits(textBox.Text);
+            int digitCaret = GetDigitCaretIndex(textBox.Text, textBox.CaretIndex);
+
+            foreach (char ch in e.Text)
+            {
+                if (digits.Length >= 6)
+                    break;
+
+                digits = digits.Insert(Math.Min(digitCaret, digits.Length), ch.ToString());
+                digitCaret++;
+            }
+
+            digits = digits.Length > 6 ? digits.Substring(0, 6) : digits;
+
+            textBox.Text = BuildMaskedDateText(digits);
+            textBox.Foreground = digits.Length == 0
+                ? System.Windows.Media.Brushes.Gray
+                : System.Windows.Media.Brushes.Black;
+
+            SetDateCaretFromDigitIndex(textBox, digitCaret);
+
+            e.Handled = true;
+        }
+
+        private void DateBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.TextBox textBox)
+                return;
+
+            if (UseCurrentDateCheckBox.IsChecked == true)
+                return;
+
+            if (e.Key == Key.Space)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key != Key.Back && e.Key != Key.Delete)
+                return;
+
+            string digits = ExtractDateDigits(textBox.Text);
+            int digitCaret = GetDigitCaretIndex(textBox.Text, textBox.CaretIndex);
+
+            if (textBox.SelectionLength > 0)
+            {
+                int selStartDigit = GetDigitCaretIndex(textBox.Text, textBox.SelectionStart);
+                int selEndDigit = GetDigitCaretIndex(textBox.Text, textBox.SelectionStart + textBox.SelectionLength);
+
+                if (selEndDigit > selStartDigit && selStartDigit < digits.Length)
+                {
+                    digits = digits.Remove(selStartDigit, Math.Min(selEndDigit - selStartDigit, digits.Length - selStartDigit));
+                    textBox.Text = BuildMaskedDateText(digits);
+                    textBox.Foreground = digits.Length == 0
+                        ? System.Windows.Media.Brushes.Gray
+                        : System.Windows.Media.Brushes.Black;
+                    SetDateCaretFromDigitIndex(textBox, selStartDigit);
+                }
+
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Back)
+            {
+                if (digitCaret > 0 && digits.Length > 0)
+                {
+                    digits = digits.Remove(digitCaret - 1, 1);
+                    digitCaret--;
+                }
+            }
+            else if (e.Key == Key.Delete)
+            {
+                if (digitCaret < digits.Length && digits.Length > 0)
+                {
+                    digits = digits.Remove(digitCaret, 1);
+                }
+            }
+
+            textBox.Text = BuildMaskedDateText(digits);
+            textBox.Foreground = digits.Length == 0
+                ? System.Windows.Media.Brushes.Gray
+                : System.Windows.Media.Brushes.Black;
+
+            SetDateCaretFromDigitIndex(textBox, digitCaret);
+
+            e.Handled = true;
+        }
+
+        private void DateBox_Pasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.TextBox textBox)
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            if (UseCurrentDateCheckBox.IsChecked == true)
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            if (!e.DataObject.GetDataPresent(typeof(string)))
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            string pastedText = ((string)e.DataObject.GetData(typeof(string))!) ?? "";
+            string pastedDigits = new string(pastedText.Where(char.IsDigit).ToArray());
+
+            if (pastedDigits.Length == 0)
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            string digits = ExtractDateDigits(textBox.Text);
+            int selStartDigit = GetDigitCaretIndex(textBox.Text, textBox.SelectionStart);
+            int selEndDigit = GetDigitCaretIndex(textBox.Text, textBox.SelectionStart + textBox.SelectionLength);
+
+            if (selEndDigit > selStartDigit && selStartDigit < digits.Length)
+            {
+                digits = digits.Remove(selStartDigit, Math.Min(selEndDigit - selStartDigit, digits.Length - selStartDigit));
+            }
+
+            int insertIndex = selStartDigit;
+            foreach (char ch in pastedDigits)
+            {
+                if (digits.Length >= 6)
+                    break;
+
+                digits = digits.Insert(Math.Min(insertIndex, digits.Length), ch.ToString());
+                insertIndex++;
+            }
+
+            textBox.Text = BuildMaskedDateText(digits);
+            textBox.Foreground = digits.Length == 0
+                ? System.Windows.Media.Brushes.Gray
+                : System.Windows.Media.Brushes.Black;
+
+            SetDateCaretFromDigitIndex(textBox, insertIndex);
+
+            e.CancelCommand();
+        }
+
+        private static string ExtractDateDigits(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            return new string(text.Where(char.IsDigit).ToArray());
+        }
+
+        private static string BuildMaskedDateText(string digits)
+        {
+            char[] chars = DatePlaceholder.ToCharArray();
+
+            for (int i = 0; i < Math.Min(digits.Length, 6); i++)
+            {
+                int targetIndex = i < 2 ? i : i + 1; // skip slash
+                chars[targetIndex] = digits[i];
+            }
+
+            return new string(chars);
+        }
+
+        private static int GetDigitCaretIndex(string? text, int caretIndex)
+        {
+            string safeText = text ?? string.Empty;
+
+            int count = 0;
+            int limit = Math.Min(caretIndex, safeText.Length);
+
+            for (int i = 0; i < limit; i++)
+            {
+                if (char.IsDigit(safeText[i]))
+                    count++;
+            }
+
+            return count;
+        }
+
+        private static void SetDateCaretFromDigitIndex(System.Windows.Controls.TextBox textBox, int digitIndex)
+        {
+            digitIndex = Math.Max(0, Math.Min(6, digitIndex));
+
+            int caretIndex = digitIndex switch
+            {
+                0 => 0,
+                1 => 1,
+                2 => 3,
+                3 => 4,
+                4 => 5,
+                5 => 6,
+                _ => 7
+            };
+
+            textBox.CaretIndex = caretIndex;
+        }
+
+        private void DateBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            if (UseCurrentDateCheckBox.IsChecked == true)
+                return;
+
+            string digits = ExtractDateDigits(DateBox.Text);
+            SetDateCaretFromDigitIndex(DateBox, digits.Length);
         }
 
         // -----------------------------
@@ -763,7 +1143,7 @@ namespace PptNotesHandoutMaker
         {
             try
             {
-                var parts = uncPath.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+                var parts = uncPath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length >= 2)
                     return $@"\\{parts[0]}\{parts[1]}";
             }

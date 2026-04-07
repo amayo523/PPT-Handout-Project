@@ -22,6 +22,7 @@ namespace PptNotesHandoutMaker.Core
 
         public string? ClassName { get; set; }
         public string? PdfTitle { get; set; }
+        public string? CreatedDate { get; set; }
 
     }
 }

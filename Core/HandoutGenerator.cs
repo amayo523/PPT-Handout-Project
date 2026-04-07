@@ -357,13 +357,13 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
                 }
 
                 if (raw.Count == 0)
-                    return new List<NoteLine>();
+                    return [];
 
                 var result = new List<NoteLine>(raw.Count);
-                foreach (var p in raw)
+                foreach (var (isListItem, indentLevel, text) in raw)
                 {
-                    int level = p.IsListItem ? Math.Max(1, p.IndentLevel) : 0;
-                    result.Add(new NoteLine(level, p.Text));
+                    int level = isListItem ? Math.Max(1, indentLevel) : 0;
+                    result.Add(new NoteLine(level, text));
                 }
 
                 return result;
@@ -429,8 +429,7 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
                         {
                             RemoveCountersAbove(numberCountersByIndent, indentLevel);
 
-                            int current;
-                            if (!numberCountersByIndent.TryGetValue(indentLevel, out current))
+                            if (!numberCountersByIndent.TryGetValue(indentLevel, out int current))
                             {
                                 current = GetBulletStartValueOrDefault(para, 1);
                             }
@@ -716,6 +715,19 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
                 }
             }
 
+            private static string TruncateFooterTitle(string text, int maxLength = 55)
+            {
+                if (string.IsNullOrWhiteSpace(text))
+                    return "";
+
+                text = text.Trim();
+
+                if (text.Length <= maxLength)
+                    return text;
+
+                return text[..(maxLength - 3)].TrimEnd() + "...";
+            }
+
             public static void BuildHandoutPdf(
                 HandoutOptions opt,
                 List<(int SlideNumber, string SlideImagePath, List<NoteLine> NotesLines)> items,
@@ -729,6 +741,11 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
 
                 string className = (opt.ClassName ?? "").Trim();
                 string pdfTitle = (opt.PdfTitle ?? "").Trim();
+
+                string createdDate = string.IsNullOrWhiteSpace(opt.CreatedDate)
+                    ? DateTime.Now.ToString("MM/yyyy")
+                    : opt.CreatedDate.Trim();
+                string footerTitle = TruncateFooterTitle(pdfTitle);
 
                 // ------------------------------------------------------------
                 // Shared layout constants
@@ -775,18 +792,21 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
                              {
                                  row.RelativeItem()
                                     .AlignLeft()
-                                    .Text(pdfTitle)
-                                    .FontSize(9)
-                                    .Bold();
+                                    .Text(footerTitle)
+                                    .FontSize(9);
+
+                                 row.RelativeItem()
+                                    .AlignCenter()
+                                    .Text(t =>
+                                    {
+                                        t.DefaultTextStyle(x => x.FontSize(9));
+                                        t.CurrentPageNumber();
+                                    });
 
                                  row.RelativeItem()
                                     .AlignRight()
-                                    .Text(t =>
-                                    {
-                                        t.DefaultTextStyle(x => x.FontSize(9).Bold());
-                                        t.Span("Page ");
-                                        t.CurrentPageNumber();
-                                    });
+                                    .Text(createdDate)
+                                    .FontSize(9);
                              });
                         });
 
@@ -1055,13 +1075,13 @@ private static bool IsRetryablePowerPointComFailure(Exception ex)
                 var s = line.TrimEnd();
 
                 if (s.StartsWith("• "))
-                    return ("•", s.Substring(2));
+                    return ("•", s[2..]);
 
                 int spaceIdx = s.IndexOf(' ');
                 if (spaceIdx > 0 && spaceIdx <= 6)
                 {
-                    string firstToken = s.Substring(0, spaceIdx);
-                    string rest = s.Substring(spaceIdx + 1);
+                    string firstToken = s[..spaceIdx];
+                    string rest = s[(spaceIdx + 1)..];
 
                     bool looksNumbered =
                         firstToken.EndsWith('.') ||
